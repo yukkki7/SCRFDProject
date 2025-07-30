@@ -106,65 +106,137 @@ public class SCRFDModel : IDisposable
     {
         var detections = new List<FaceDetection>();
         
-        // SCRFD outputs: scores, bboxes, kpss (keypoints)
-        var scoresOutput = outputs.FirstOrDefault(x => x.Name.Contains("scores") || x.Name.Contains("cls"))?.Value as Tensor<float>;
-        var bboxesOutput = outputs.FirstOrDefault(x => x.Name.Contains("bbox") || x.Name.Contains("loc"))?.Value as Tensor<float>;
-        var keypointsOutput = outputs.FirstOrDefault(x => x.Name.Contains("kps") || x.Name.Contains("landmark"))?.Value as Tensor<float>;
+        // Debug: Print all output names and shapes
+        Console.WriteLine("Model outputs:");
+        foreach (var output in outputs)
+        {
+            if (output.Value is Tensor<float> tensor)
+            {
+                Console.WriteLine($"  {output.Name}: Shape=[{string.Join(", ", tensor.Dimensions.ToArray())}]");
+            }
+        }
         
-        if (scoresOutput == null || bboxesOutput == null)
+        // SCRFD typically has multiple outputs for different feature pyramid levels
+        // Common patterns: score_8, score_16, score_32, bbox_8, bbox_16, bbox_32, kps_8, kps_16, kps_32
+        var scoreOutputs = outputs.Where(x => x.Name.Contains("score") || x.Name.Contains("cls")).ToList();
+        var bboxOutputs = outputs.Where(x => x.Name.Contains("bbox") || x.Name.Contains("loc")).ToList();
+        var kpsOutputs = outputs.Where(x => x.Name.Contains("kps") || x.Name.Contains("landmark")).ToList();
+        
+        if (scoreOutputs.Count == 0 || bboxOutputs.Count == 0)
         {
             Console.WriteLine("Warning: Could not find expected SCRFD outputs");
+            Console.WriteLine($"Found {scoreOutputs.Count} score outputs and {bboxOutputs.Count} bbox outputs");
             return detections;
         }
         
-        var scores = scoresOutput.ToArray();
-        var bboxes = bboxesOutput.ToArray();
-        var keypoints = keypointsOutput?.ToArray();
-        
-        // Calculate scale factors for coordinate conversion
-        var scaleX = (float)originalSize.Width / inputSize;
-        var scaleY = (float)originalSize.Height / inputSize;
-        
-        // Process detections (simplified - actual SCRFD has anchor-based decoding)
-        var numDetections = scores.Length;
-        var confidenceThreshold = 0.5f;
-        
-        for (int i = 0; i < numDetections; i++)
+        // Process each feature pyramid level
+        for (int i = 0; i < Math.Min(scoreOutputs.Count, bboxOutputs.Count); i++)
         {
-            if (scores[i] > confidenceThreshold)
+            var scoreOutput = scoreOutputs[i].Value as Tensor<float>;
+            var bboxOutput = bboxOutputs[i].Value as Tensor<float>;
+            var kpsOutput = i < kpsOutputs.Count ? kpsOutputs[i].Value as Tensor<float> : null;
+            
+            if (scoreOutput != null && bboxOutput != null)
             {
-                var detection = new FaceDetection
-                {
-                    Confidence = scores[i],
-                    BoundingBox = new BoundingBox
-                    {
-                        X = bboxes[i * 4] * scaleX,
-                        Y = bboxes[i * 4 + 1] * scaleY,
-                        Width = (bboxes[i * 4 + 2] - bboxes[i * 4]) * scaleX,
-                        Height = (bboxes[i * 4 + 3] - bboxes[i * 4 + 1]) * scaleY
-                    }
-                };
-                
-                // Add keypoints if available
-                if (keypoints != null && keypoints.Length > i * 10)
-                {
-                    detection.Keypoints = new List<Point2D>();
-                    for (int k = 0; k < 5; k++) // 5 facial keypoints
-                    {
-                        detection.Keypoints.Add(new Point2D
-                        {
-                            X = keypoints[i * 10 + k * 2] * scaleX,
-                            Y = keypoints[i * 10 + k * 2 + 1] * scaleY
-                        });
-                    }
-                }
-                
-                detections.Add(detection);
+                var levelDetections = ProcessSingleLevel(scoreOutput, bboxOutput, kpsOutput, originalSize, inputSize, i);
+                detections.AddRange(levelDetections);
             }
         }
         
         // Apply NMS (Non-Maximum Suppression)
         detections = ApplyNMS(detections, 0.4f);
+        
+        return detections;
+    }
+    
+    private List<FaceDetection> ProcessSingleLevel(Tensor<float> scores, Tensor<float> bboxes, Tensor<float>? keypoints, Size originalSize, int inputSize, int level)
+    {
+        var detections = new List<FaceDetection>();
+        
+        if (scores == null || bboxes == null) return detections;
+        
+        var scoresArray = scores.ToArray();
+        var bboxesArray = bboxes.ToArray();
+        
+        // Calculate scale factors for coordinate conversion
+        var scaleX = (float)originalSize.Width / inputSize;
+        var scaleY = (float)originalSize.Height / inputSize;
+        
+        // SCRFD uses anchor-based detection with different strides
+        var stride = Math.Pow(2, level + 3); // 8, 16, 32 for levels 0, 1, 2
+        var confidenceThreshold = 0.5f;
+        
+        // Process scores and bboxes based on actual tensor shapes
+        var scoreDims = scores.Dimensions.ToArray();
+        var bboxDims = bboxes.Dimensions.ToArray();
+        
+        Console.WriteLine($"Level {level}: Score dims=[{string.Join(",", scoreDims)}], BBox dims=[{string.Join(",", bboxDims)}]");
+        
+        // Typical SCRFD output format: [batch, anchors, classes] for scores, [batch, anchors, 4] for bboxes
+        if (scoreDims.Length >= 2 && bboxDims.Length >= 2)
+        {
+            var numAnchors = scoreDims[1];
+            var numClasses = scoreDims.Length > 2 ? scoreDims[2] : 1;
+            
+            for (int anchor = 0; anchor < numAnchors; anchor++)
+            {
+                // Get confidence score (use max across classes if multi-class)
+                float confidence = 0;
+                if (numClasses == 1)
+                {
+                    confidence = scoresArray[anchor];
+                }
+                else
+                {
+                    for (int cls = 0; cls < numClasses; cls++)
+                    {
+                        var score = scoresArray[anchor * numClasses + cls];
+                        confidence = Math.Max(confidence, score);
+                    }
+                }
+                
+                if (confidence > confidenceThreshold)
+                {
+                    // Extract bounding box coordinates
+                    var x1 = bboxesArray[anchor * 4] * scaleX;
+                    var y1 = bboxesArray[anchor * 4 + 1] * scaleY;
+                    var x2 = bboxesArray[anchor * 4 + 2] * scaleX;
+                    var y2 = bboxesArray[anchor * 4 + 3] * scaleY;
+                    
+                    var detection = new FaceDetection
+                    {
+                        Confidence = confidence,
+                        BoundingBox = new BoundingBox
+                        {
+                            X = x1,
+                            Y = y1,
+                            Width = x2 - x1,
+                            Height = y2 - y1
+                        }
+                    };
+                    
+                    // Add keypoints if available
+                    if (keypoints != null)
+                    {
+                        var kpsArray = keypoints.ToArray();
+                        detection.Keypoints = new List<Point2D>();
+                        for (int k = 0; k < 5; k++) // 5 facial keypoints
+                        {
+                            if (anchor * 10 + k * 2 + 1 < kpsArray.Length)
+                            {
+                                detection.Keypoints.Add(new Point2D
+                                {
+                                    X = kpsArray[anchor * 10 + k * 2] * scaleX,
+                                    Y = kpsArray[anchor * 10 + k * 2 + 1] * scaleY
+                                });
+                            }
+                        }
+                    }
+                    
+                    detections.Add(detection);
+                }
+            }
+        }
         
         return detections;
     }
