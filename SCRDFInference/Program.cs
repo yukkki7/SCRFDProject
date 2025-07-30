@@ -34,14 +34,19 @@ class Program
             description: "Confidence threshold for face detection (0.0-1.0)",
             getDefaultValue: () => 0.5f);
         
+        var visualizeOption = new Option<FileInfo?>(
+            name: "--visualize",
+            description: "Save output image with bounding boxes drawn (e.g., output.jpg)");
+        
         rootCommand.AddOption(imageOption);
         rootCommand.AddOption(modelOption);
         rootCommand.AddOption(downloadModelOption);
         rootCommand.AddOption(listModelsOption);
         rootCommand.AddOption(outputOption);
         rootCommand.AddOption(confidenceOption);
+        rootCommand.AddOption(visualizeOption);
         
-        rootCommand.SetHandler(async (image, model, downloadModel, listModels, output, confidence) =>
+        rootCommand.SetHandler(async (image, model, downloadModel, listModels, output, confidence, visualize) =>
         {
             if (listModels)
             {
@@ -58,7 +63,7 @@ class Program
                     
                     if (image != null)
                     {
-                        await RunSCRFDInference(image, new FileInfo(modelPath), output, confidence);
+                        await RunSCRFDInference(image, new FileInfo(modelPath), output, confidence, visualize);
                     }
                 }
                 catch (Exception ex)
@@ -80,14 +85,14 @@ class Program
                 return;
             }
             
-            await RunSCRFDInference(image, model, output, confidence);
+            await RunSCRFDInference(image, model, output, confidence, visualize);
             
-        }, imageOption, modelOption, downloadModelOption, listModelsOption, outputOption, confidenceOption);
+        }, imageOption, modelOption, downloadModelOption, listModelsOption, outputOption, confidenceOption, visualizeOption);
         
         return await rootCommand.InvokeAsync(args);
     }
     
-    static async Task RunSCRFDInference(FileInfo imageFile, FileInfo modelFile, FileInfo? outputFile, float confidence)
+    static async Task RunSCRFDInference(FileInfo imageFile, FileInfo modelFile, FileInfo? outputFile, float confidence, FileInfo? visualizeFile)
     {
         var telemetry = new FaceDetectionTelemetry();
         var stopwatch = Stopwatch.StartNew();
@@ -120,6 +125,12 @@ class Program
             
             // Output results
             await OutputDetectionResults(telemetry, outputFile);
+            
+            // Save visualization if requested
+            if (visualizeFile != null && telemetry.Success && telemetry.Detections.Count > 0)
+            {
+                await ImageVisualizer.SaveDetectionResults(imageFile.FullName, telemetry.Detections, visualizeFile.FullName);
+            }
             
         }
         catch (Exception ex)
