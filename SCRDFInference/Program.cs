@@ -92,7 +92,7 @@ class Program
         return await rootCommand.InvokeAsync(args);
     }
     
-    static async Task RunSCRFDInference(FileInfo imageFile, FileInfo modelFile, FileInfo? outputFile, float confidence, FileInfo? visualizeFile)
+    static async Task RunSCRFDInference(FileInfo imageFile, FileInfo modelFile, FileInfo? outputFile, float confidenceThreshold, FileInfo? visualizeFile)
     {
         var telemetry = new FaceDetectionTelemetry();
         var stopwatch = Stopwatch.StartNew();
@@ -102,17 +102,17 @@ class Program
             Console.WriteLine($"Starting SCRFD face detection...");
             Console.WriteLine($"Image: {imageFile.FullName}");
             Console.WriteLine($"Model: {modelFile.FullName}");
-            Console.WriteLine($"Confidence threshold: {confidence}");
+            Console.WriteLine($"Confidence threshold: {confidenceThreshold}");
             Console.WriteLine();
             
             telemetry.StartTime = DateTime.UtcNow;
             telemetry.ImagePath = imageFile.FullName;
             telemetry.ModelPath = modelFile.FullName;
-            telemetry.ConfidenceThreshold = confidence;
+            telemetry.ConfidenceThreshold = confidenceThreshold;
             
             // Load model and run face detection
             using var scrfdModel = new SCRFDModel(modelFile.FullName);
-            var result = await scrfdModel.DetectFaces(imageFile.FullName);
+            var result = await scrfdModel.DetectFaces(imageFile.FullName, confidenceThreshold);
             
             stopwatch.Stop();
             telemetry.TotalTimeMs = stopwatch.ElapsedMilliseconds;
